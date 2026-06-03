@@ -1,9 +1,9 @@
 {
 	"id": "arxiv-papers",
 	"name": "arXiv Papers",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"minAppVersion": "0.15.0",
-	"description": "Retrieve and import research papers from arXiv. Fork of willjhliang/obsidian-papers with rate-limit handling and OpenAlex fallback.",
+	"description": "Retrieve and import research papers from arXiv, with rate-limit handling and an OpenAlex metadata fallback for VPN users.",
 	"author": "Ar4l",
 	"authorUrl": "https://github.com/Ar4l",
 	"isDesktopOnly": false

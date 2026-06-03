@@ -13,7 +13,7 @@
 // === Helpers (same logic as main.ts) ===
 
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-arxiv-papers/1.0.2 (+https://github.com/Ar4l/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.3 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 
@@ -134,6 +134,61 @@ async function fetchPaperEndToEnd(arxivId, userEmail = "") {
     }
 }
 
+// === Note title helpers (mirror main.ts) ===
+const lastName = (fullName) => {
+    const parts = fullName.trim().split(/\s+/);
+    return parts[parts.length - 1] || fullName;
+};
+
+const formatAuthorsForTitle = (authors) => {
+    if (authors.length === 0) return "Unknown";
+    const first = lastName(authors[0]);
+    if (authors.length === 1) return first;
+    if (authors.length === 2) return `${first} & ${lastName(authors[1])}`;
+    return `${first} et al.`;
+};
+
+const generateNoteTitle = (template, metadata) => template
+    .replace(/\{authors\}/g, formatAuthorsForTitle(metadata.authors))
+    .replace(/\{year\}/g, String(metadata.year))
+    .replace(/\{title\}/g, metadata.title);
+
+function* letterSuffixes() {
+    const chars = "abcdefghijklmnopqrstuvwxyz";
+    for (const c of chars) yield c;
+    for (const a of chars) for (const b of chars) yield a + b;
+}
+
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// In-memory analog of resolveNoteTitleConflict — takes a set of existing names
+// instead of hitting the vault adapter, so we can unit-test the logic deterministically.
+function resolveNoteTitleConflictSync(existingNames, baseTitle) {
+    const set = new Set(existingNames);
+    const bareExists = set.has(baseTitle);
+    const suffixPattern = new RegExp(`^${escapeRegex(baseTitle)}([a-z]+)$`);
+    const usedLetters = new Set();
+    for (const name of set) {
+        const m = name.match(suffixPattern);
+        if (m) usedLetters.add(m[1]);
+    }
+    if (!bareExists && usedLetters.size === 0) return { newTitle: baseTitle };
+    const nextFreeLetter = (used) => {
+        for (const l of letterSuffixes()) if (!used.has(l)) return l;
+        throw new Error("ran out of suffixes");
+    };
+    if (bareExists) {
+        const bareLetter = nextFreeLetter(usedLetters);
+        usedLetters.add(bareLetter);
+        return {
+            newTitle: baseTitle + nextFreeLetter(usedLetters),
+            renameExistingFrom: baseTitle,
+            renameExistingTo: baseTitle + bareLetter,
+        };
+    }
+    return { newTitle: baseTitle + nextFreeLetter(usedLetters) };
+}
+
 // === Test harness ===
 const results = [];
 async function test(name, fn) {
@@ -243,6 +298,87 @@ await test("DETERMINISTIC: arxiv timeout -> OpenAlex fallback fires", async () =
     } finally {
         for (let i = 0; i < origBackoffs.length; i++) RATE_LIMIT_BACKOFFS_MS[i] = origBackoffs[i];
     }
+});
+
+// === Note title tests ===
+
+await test("title: single author -> 'Lastname Year'", async () => {
+    const t = generateNoteTitle("{authors} {year}", {
+        title: "Foo", authors: ["Ashish Vaswani"], year: 2017, url: "",
+    });
+    assert(t === "Vaswani 2017", `got: ${t}`);
+});
+
+await test("title: two authors -> 'A & B Year'", async () => {
+    const t = generateNoteTitle("{authors} {year}", {
+        title: "Foo", authors: ["Ashish Vaswani", "Noam Shazeer"], year: 2017, url: "",
+    });
+    assert(t === "Vaswani & Shazeer 2017", `got: ${t}`);
+});
+
+await test("title: 3+ authors -> 'A et al. Year'", async () => {
+    const t = generateNoteTitle("{authors} {year}", {
+        title: "Foo", authors: ["A One", "B Two", "C Three", "D Four"], year: 2023, url: "",
+    });
+    assert(t === "One et al. 2023", `got: ${t}`);
+});
+
+await test("title: multi-word surname collapses to final token (known limitation)", async () => {
+    const t = generateNoteTitle("{authors} {year}", {
+        title: "t", authors: ["Laurens van der Maaten"], year: 2008, url: "",
+    });
+    assert(t === "Maaten 2008", `got: ${t}`);
+});
+
+await test("title: zero authors -> 'Unknown'", async () => {
+    const t = generateNoteTitle("{authors} {year}", {
+        title: "t", authors: [], year: 2020, url: "",
+    });
+    assert(t === "Unknown 2020", `got: ${t}`);
+});
+
+await test("title: custom template with {title} placeholder", async () => {
+    const t = generateNoteTitle("{title} ({authors}, {year})", {
+        title: "Foo", authors: ["A B", "C D"], year: 2021, url: "",
+    });
+    assert(t === "Foo (B & D, 2021)", `got: ${t}`);
+});
+
+await test("conflict: no existing notes -> bare title, no rename", async () => {
+    const r = resolveNoteTitleConflictSync([], "Smith 2023");
+    assert(r.newTitle === "Smith 2023", `newTitle=${r.newTitle}`);
+    assert(!r.renameExistingFrom, "should not rename");
+});
+
+await test("conflict: bare exists -> rename bare to 'a', new becomes 'b'", async () => {
+    const r = resolveNoteTitleConflictSync(["Smith 2023"], "Smith 2023");
+    assert(r.renameExistingFrom === "Smith 2023", `renameFrom=${r.renameExistingFrom}`);
+    assert(r.renameExistingTo === "Smith 2023a", `renameTo=${r.renameExistingTo}`);
+    assert(r.newTitle === "Smith 2023b", `newTitle=${r.newTitle}`);
+});
+
+await test("conflict: a+b exist (no bare) -> new becomes 'c', no rename", async () => {
+    const r = resolveNoteTitleConflictSync(["Smith 2023a", "Smith 2023b"], "Smith 2023");
+    assert(r.newTitle === "Smith 2023c", `newTitle=${r.newTitle}`);
+    assert(!r.renameExistingFrom, "should not rename");
+});
+
+await test("conflict: bare + a + b exist (rare manual case) -> rename bare to 'c', new becomes 'd'", async () => {
+    const r = resolveNoteTitleConflictSync(["Smith 2023", "Smith 2023a", "Smith 2023b"], "Smith 2023");
+    assert(r.renameExistingFrom === "Smith 2023", `renameFrom=${r.renameExistingFrom}`);
+    assert(r.renameExistingTo === "Smith 2023c", `renameTo=${r.renameExistingTo}`);
+    assert(r.newTitle === "Smith 2023d", `newTitle=${r.newTitle}`);
+});
+
+await test("conflict: unrelated notes in folder don't trigger suffix", async () => {
+    const r = resolveNoteTitleConflictSync(["Jones 2024", "Smith 2022", "Smith and others 2023"], "Smith 2023");
+    assert(r.newTitle === "Smith 2023", `newTitle=${r.newTitle}`);
+});
+
+await test("conflict: a..z used -> next is 'aa'", async () => {
+    const all26 = "abcdefghijklmnopqrstuvwxyz".split("").map(c => "Smith 2023" + c);
+    const r = resolveNoteTitleConflictSync(all26, "Smith 2023");
+    assert(r.newTitle === "Smith 2023aa", `newTitle=${r.newTitle}`);
 });
 
 // === Summary ===

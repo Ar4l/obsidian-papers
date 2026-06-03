@@ -2,8 +2,6 @@
 
 arXiv Papers retrieves and imports research papers into [Obsidian](https://obsidian.md). It queries the arXiv API to download PDFs and save metadata directly into your vault, with a built-in OpenAlex fallback for when arXiv rate-limits your IP (common on VPNs).
 
-> Fork of [willjhliang/obsidian-papers](https://github.com/willjhliang/obsidian-papers) with rate-limit handling, request timeout, and OpenAlex fallback.
-
 https://github.com/user-attachments/assets/12d1b2d4-46f9-416d-b1c7-95e07fae14b3
 
 ## Usage
@@ -38,10 +36,14 @@ Then in Obsidian: **Settings → Community plugins**, toggle "arXiv Papers" off 
 
 When arXiv rate-limits your IP (common on VPNs — arXiv throttles per-IP via Fastly, so a shared egress IP can put you in penalty), the plugin falls back to OpenAlex for paper metadata. Setting your email in **Settings → arXiv Papers → Contact email** routes you through OpenAlex's polite pool with a higher quota.
 
-### Run the mock tests
+### Run the tests
 
 ```bash
 node tools/test-arxiv.mjs
 ```
 
-Verifies the rate limiter, timeout, 429 retry, OpenAlex fallback, and polite User-Agent — no network access required.
+Exercises the rate limiter, timeout, 429 retry, OpenAlex fallback, polite User-Agent, note-title generation, and title-conflict resolution against live arXiv + OpenAlex. Requires network access.
+
+## Credits
+
+Originally written by William Liang.

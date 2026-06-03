@@ -1,6 +1,5 @@
 import {
     App,
-    Modal,
     Notice,
     Plugin,
     PluginSettingTab,
@@ -18,6 +17,7 @@ interface Settings {
     notesFolder: string;
     pdfFolder: string;
     noteTemplate: string;
+    noteTitleFormat: string;
     userEmail: string;
 }
 
@@ -32,6 +32,7 @@ year: {{YEAR}}
 url: {{URL}}
 ---
 ![[{{PDF}}]]`,
+    noteTitleFormat: "{authors} {year}",
     userEmail: "",
 };
 
@@ -50,10 +51,99 @@ const extractArxivId = (url: string): string | null => {
     return match ? match[2] : null;
 };
 
+// Last whitespace-separated token. "Ashish Vaswani" -> "Vaswani".
+// Multi-word surnames ("van der Maaten") collapse to the final word ("Maaten") —
+// good enough for the 1-30 papers/day use case; user can override per-note.
+const lastName = (fullName: string): string => {
+    const parts = fullName.trim().split(/\s+/);
+    return parts[parts.length - 1] || fullName;
+};
+
+const formatAuthorsForTitle = (authors: string[]): string => {
+    if (authors.length === 0) return "Unknown";
+    const first = lastName(authors[0]);
+    if (authors.length === 1) return first;
+    if (authors.length === 2) return `${first} & ${lastName(authors[1])}`;
+    return `${first} et al.`;
+};
+
+const generateNoteTitle = (template: string, metadata: PaperMetadata): string => {
+    return template
+        .replace(/\{authors\}/g, formatAuthorsForTitle(metadata.authors))
+        .replace(/\{year\}/g, String(metadata.year))
+        .replace(/\{title\}/g, metadata.title);
+};
+
+// "a","b",...,"z","aa","ab",... — supports >26 conflicts without breaking.
+function* letterSuffixes(): Generator<string> {
+    const chars = "abcdefghijklmnopqrstuvwxyz";
+    for (const c of chars) yield c;
+    for (const a of chars) for (const b of chars) yield a + b;
+}
+
+const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+interface TitleConflictResolution {
+    newTitle: string;
+    renameExistingFrom?: string;
+    renameExistingTo?: string;
+}
+
+// Decide the final note title given that `baseTitle` may collide with existing
+// notes in `folderPath`. If the bare baseTitle exists, it gets renamed to
+// `baseTitle + 'a'` (or the next free letter) and the new note takes the
+// letter after that. If only suffixed variants exist, the new note takes the
+// next free letter and no rename happens.
+async function resolveNoteTitleConflict(
+    app: App,
+    folderPath: string,
+    baseTitle: string,
+): Promise<TitleConflictResolution> {
+    const folder = folderPath.replace(/\/$/, "");
+    let existingNames: Set<string>;
+    try {
+        const list = await app.vault.adapter.list(folder || "/");
+        existingNames = new Set(
+            list.files
+                .map(p => p.split("/").pop() || "")
+                .filter(f => f.endsWith(".md"))
+                .map(f => f.slice(0, -3)),
+        );
+    } catch {
+        return { newTitle: baseTitle };
+    }
+
+    const bareExists = existingNames.has(baseTitle);
+    const suffixPattern = new RegExp(`^${escapeRegex(baseTitle)}([a-z]+)$`);
+    const usedLetters = new Set<string>();
+    for (const name of existingNames) {
+        const m = name.match(suffixPattern);
+        if (m) usedLetters.add(m[1]);
+    }
+
+    if (!bareExists && usedLetters.size === 0) return { newTitle: baseTitle };
+
+    const nextFreeLetter = (used: Set<string>): string => {
+        for (const l of letterSuffixes()) if (!used.has(l)) return l;
+        throw new Error("ran out of suffixes");
+    };
+
+    if (bareExists) {
+        const bareLetter = nextFreeLetter(usedLetters);
+        usedLetters.add(bareLetter);
+        return {
+            newTitle: baseTitle + nextFreeLetter(usedLetters),
+            renameExistingFrom: baseTitle,
+            renameExistingTo: baseTitle + bareLetter,
+        };
+    }
+    return { newTitle: baseTitle + nextFreeLetter(usedLetters) };
+}
+
 // arXiv asks for ≥3s between requests; their throttle is per-IP via Fastly.
 // VPN users share an egress IP, so they get throttled by the whole pool.
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-arxiv-papers/1.0.2 (+https://github.com/Ar4l/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.3 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 
@@ -302,14 +392,34 @@ export default class PapersPlugin extends Plugin {
     }
 
     async createNoteFromMetadata(metadata: PaperMetadata) {
-        const filename = this.sanitizeFileName(metadata.title) + ".md";
         const folderPath = this.settings.notesFolder?.trim()
             ? this.settings.notesFolder.trim().replace(/\/$/, "") + "/"
             : "";
-        const filePath = folderPath + filename;
 
-        const fileExists = await this.app.vault.adapter.exists(filePath);
-        if (fileExists && !(await this.confirmOverwrite())) return;
+        const rawTitle = generateNoteTitle(
+            this.settings.noteTitleFormat || DEFAULT_SETTINGS.noteTitleFormat,
+            metadata,
+        );
+        const baseTitle = this.sanitizeFileName(rawTitle);
+        const resolution = await resolveNoteTitleConflict(this.app, folderPath, baseTitle);
+
+        if (resolution.renameExistingFrom && resolution.renameExistingTo) {
+            const oldPath = folderPath + resolution.renameExistingFrom + ".md";
+            const newPath = folderPath + resolution.renameExistingTo + ".md";
+            const existing = this.app.vault.getAbstractFileByPath(oldPath);
+            if (existing instanceof TFile) {
+                try {
+                    await this.app.fileManager.renameFile(existing, newPath);
+                    new Notice(`Renamed existing note to "${resolution.renameExistingTo}"`);
+                } catch (e) {
+                    new Notice(`Could not rename existing note: ${(e as Error).message}`);
+                    return;
+                }
+            }
+        }
+
+        const filename = resolution.newTitle + ".md";
+        const filePath = folderPath + filename;
 
         let pdfFilename = "";
         if (this.settings.noteTemplate.includes("{{PDF}}") && metadata.url.includes('arxiv.org')) {
@@ -324,18 +434,10 @@ export default class PapersPlugin extends Plugin {
         const content = this.formatNoteContent(metadata, pdfFilename);
 
         try {
-            if (fileExists) {
-                const file = await this.app.vault.getAbstractFileByPath(filePath);
-                if (file instanceof TFile) {
-                    await this.app.vault.modify(file, content);
-                }
-            } else {
-                await this.app.vault.create(filePath, content);
-            }
-
+            await this.app.vault.create(filePath, content);
             new Notice("Created paper note: " + filename);
 
-            const file = await this.app.vault.getAbstractFileByPath(filePath);
+            const file = this.app.vault.getAbstractFileByPath(filePath);
             if (file instanceof TFile) {
                 await this.app.workspace.getLeaf(true).openFile(file);
             }
@@ -454,12 +556,6 @@ export default class PapersPlugin extends Plugin {
             .replace(/\{\{YEAR\}\}/g, metadata.year.toString())
             .replace(/\{\{AUTHORS\}\}/g, authorsYaml)
             .replace(/\{\{PDF\}\}/g, pdfFilename);
-    }
-
-    confirmOverwrite(): Promise<boolean> {
-        return new Promise(resolve => {
-            new ConfirmOverwriteModal(this.app, resolve).open();
-        });
     }
 
     async loadSettings() {
@@ -633,47 +729,6 @@ class ImportSelectModal extends SuggestModal<PaperMetadata> {
     }
 }
 
-class ConfirmOverwriteModal extends Modal {
-    onDecision: (overwrite: boolean) => void;
-
-    constructor(app: App, onDecision: (overwrite: boolean) => void) {
-        super(app);
-        this.onDecision = onDecision;
-    }
-
-    onOpen() {
-        const { contentEl, titleEl } = this;
-
-        titleEl.setText("File exists");
-        contentEl.empty();
-        contentEl.createEl("p", { text: "A note with this title already exists. Do you want to overwrite?" });
-
-        const buttonContainer = contentEl.createDiv({ cls: "modal-button-container" });
-        Object.assign(buttonContainer.style, {
-            display: "flex",
-            justifyContent: "flex-end",
-            gap: "10px",
-            marginTop: "30px"
-        });
-
-        const overwriteButton = buttonContainer.createEl("button", { text: "Overwrite", cls: "mod-warning" });
-        overwriteButton.onclick = () => {
-            this.close();
-            this.onDecision(true);
-        };
-
-        const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
-        cancelButton.onclick = () => {
-            this.close();
-            this.onDecision(false);
-        };
-    }
-
-    onClose() {
-        this.contentEl.empty();
-    }
-}
-
 class PapersSettingTab extends PluginSettingTab {
     plugin: PapersPlugin;
 
@@ -708,6 +763,19 @@ class PapersSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.pdfFolder)
                     .onChange(async value => {
                         this.plugin.settings.pdfFolder = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Note title format")
+            .setDesc("Template for the note's filename. Placeholders: {authors} (Smith / Smith & Jones / Smith et al.), {year}, {title}. Collisions are auto-suffixed with letters (Smith 2023a, Smith 2023b, ...).")
+            .addText(text =>
+                text
+                    .setPlaceholder(DEFAULT_SETTINGS.noteTitleFormat)
+                    .setValue(this.plugin.settings.noteTitleFormat)
+                    .onChange(async value => {
+                        this.plugin.settings.noteTitleFormat = value || DEFAULT_SETTINGS.noteTitleFormat;
                         await this.plugin.saveSettings();
                     })
             );
