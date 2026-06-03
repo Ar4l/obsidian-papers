@@ -4,6 +4,8 @@ import {
     Notice,
     Plugin,
     PluginSettingTab,
+    RequestUrlParam,
+    RequestUrlResponse,
     Setting,
     SuggestModal,
     TFile,
@@ -16,6 +18,7 @@ interface Settings {
     notesFolder: string;
     pdfFolder: string;
     noteTemplate: string;
+    userEmail: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -29,6 +32,7 @@ year: {{YEAR}}
 url: {{URL}}
 ---
 ![[{{PDF}}]]`,
+    userEmail: "",
 };
 
 interface PaperMetadata {
@@ -45,6 +49,154 @@ const extractArxivId = (url: string): string | null => {
     const match = url.match(/arxiv\.org\/(abs|pdf|html)\/(\d{4}\.\d{4,5})(v\d+)?/);
     return match ? match[2] : null;
 };
+
+// arXiv asks for ≥3s between requests; their throttle is per-IP via Fastly.
+// VPN users share an egress IP, so they get throttled by the whole pool.
+const ARXIV_MIN_GAP_MS = 3000;
+const POLITE_UA = "obsidian-papers/1.0.2 (+https://github.com/willjhliang/obsidian-papers)";
+const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
+const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
+
+let lastArxivCallAt = 0;
+async function arxivRateLimit(): Promise<void> {
+    const gap = Date.now() - lastArxivCallAt;
+    if (gap < ARXIV_MIN_GAP_MS) {
+        await new Promise(r => setTimeout(r, ARXIV_MIN_GAP_MS - gap));
+    }
+    lastArxivCallAt = Date.now();
+}
+
+// Wrap requestUrl with a wall-clock timeout. Obsidian's requestUrl has no
+// timeout option, and arXiv "tarpits" 429 responses for 15-46s — we abort
+// fast and retry instead of waiting.
+function requestWithTimeout(
+    opts: RequestUrlParam,
+    timeoutMs: number,
+    requestFn: (opts: RequestUrlParam) => Promise<RequestUrlResponse> = requestUrl,
+): Promise<RequestUrlResponse> {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error("TIMEOUT"));
+        }, timeoutMs);
+        requestFn(opts).then(
+            res => { if (!settled) { settled = true; clearTimeout(timer); resolve(res); } },
+            err => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } },
+        );
+    });
+}
+
+interface ArxivRequestOpts {
+    maxRetries?: number;
+    timeoutMs?: number;
+    onRetry?: (attempt: number, backoffMs: number, reason: string) => void;
+    requestFn?: (opts: RequestUrlParam) => Promise<RequestUrlResponse>;
+}
+
+class ArxivRateLimitedError extends Error {
+    constructor(msg = "arXiv is rate-limiting your IP. Please wait ~1 minute and retry.") {
+        super(msg);
+        this.name = "ArxivRateLimitedError";
+    }
+}
+
+async function arxivRequest(url: string, opts: ArxivRequestOpts = {}): Promise<RequestUrlResponse> {
+    const maxRetries = opts.maxRetries ?? 2;
+    const timeoutMs = opts.timeoutMs ?? 10000;
+    const onRetry = opts.onRetry ?? (() => { });
+    const requestFn = opts.requestFn ?? requestUrl;
+
+    // Track timeouts separately — arxiv "tarpits" rate-limited requests by
+    // holding the connection open until our client timeout fires, so repeated
+    // timeouts on the same URL are equivalent to a 429 in disguise.
+    let consecutiveTimeouts = 0;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        await arxivRateLimit();
+        try {
+            const res = await requestWithTimeout({
+                url,
+                throw: false,
+                headers: { "User-Agent": POLITE_UA },
+            }, timeoutMs, requestFn);
+
+            if (res.status === 200) return res;
+
+            if (res.status === 429 || res.status === 503) {
+                if (attempt === maxRetries) throw new ArxivRateLimitedError();
+                const backoff = RATE_LIMIT_BACKOFFS_MS[Math.min(attempt, RATE_LIMIT_BACKOFFS_MS.length - 1)];
+                onRetry(attempt + 1, backoff, `rate-limited (HTTP ${res.status})`);
+                await new Promise(r => setTimeout(r, backoff));
+                continue;
+            }
+
+            throw new Error(`arXiv HTTP ${res.status}`);
+        } catch (e) {
+            const err = e as Error;
+            if (err instanceof ArxivRateLimitedError) throw err;
+            const isTimeout = err.message === "TIMEOUT";
+            const isNetwork = isTimeout || /ECONN|ENET|network|request|fetch/i.test(err.message);
+
+            if (isTimeout) consecutiveTimeouts++; else consecutiveTimeouts = 0;
+
+            // Two timeouts in a row almost certainly means we're tarpitted —
+            // surface as rate-limit so the caller's OpenAlex fallback fires
+            // instead of bouncing through more useless retries.
+            if (consecutiveTimeouts >= 2) {
+                throw new ArxivRateLimitedError(
+                    "arXiv is tarpitting your IP (repeated timeouts). Falling back to OpenAlex.",
+                );
+            }
+
+            if (!isNetwork || attempt === maxRetries) {
+                if (isTimeout) throw new ArxivRateLimitedError("arXiv timed out repeatedly. Falling back to OpenAlex.");
+                throw err;
+            }
+
+            // Use longer rate-limit backoffs on timeouts (likely tarpit),
+            // short network backoffs only for genuine network errors.
+            const backoffTable = isTimeout ? RATE_LIMIT_BACKOFFS_MS : NETWORK_BACKOFFS_MS;
+            const backoff = backoffTable[Math.min(attempt, backoffTable.length - 1)];
+            onRetry(attempt + 1, backoff, isTimeout ? "timeout (likely throttled)" : `network error: ${err.message}`);
+            await new Promise(r => setTimeout(r, backoff));
+        }
+    }
+    throw new Error("arxivRequest: exhausted retries");
+}
+
+// Fallback: OpenAlex doesn't share arXiv's IP throttle. Covers arXiv papers
+// that have the 10.48550/arXiv.<id> DOI (assigned for papers ≥ 2022).
+// Older papers will 404 here; the caller should surface a clear error.
+async function openAlexLookup(
+    arxivId: string,
+    userEmail: string,
+    requestFn: (opts: RequestUrlParam) => Promise<RequestUrlResponse> = requestUrl,
+): Promise<PaperMetadata | null> {
+    const mailto = (userEmail && userEmail.trim()) || "obsidian-papers@example.com";
+    const url = `https://api.openalex.org/works/doi:10.48550/arXiv.${arxivId}?mailto=${encodeURIComponent(mailto)}`;
+    const res = await requestWithTimeout({
+        url,
+        throw: false,
+        headers: { "User-Agent": POLITE_UA },
+    }, 10000, requestFn);
+    if (res.status === 404) return null;
+    if (res.status !== 200) throw new Error(`OpenAlex HTTP ${res.status}`);
+
+    const j = res.json as {
+        title?: string;
+        publication_year?: number;
+        authorships?: Array<{ author?: { display_name?: string } }>;
+    };
+    const title = (j.title || "").trim().replace(/\s+/g, " ");
+    if (!title) return null;
+    const authors = (j.authorships || [])
+        .map(a => a.author?.display_name || "")
+        .filter(Boolean);
+    const year = j.publication_year ?? new Date().getFullYear();
+    return { title, authors, year, url: `https://arxiv.org/abs/${arxivId}` };
+}
 
 export default class PapersPlugin extends Plugin {
     settings: Settings;
@@ -86,22 +238,27 @@ export default class PapersPlugin extends Plugin {
             return;
         }
 
-        // Show loading notice for metadata fetch
         const metadataNotice = new Notice("Fetching paper metadata from arXiv...", 0);
-        
+
         try {
-            const metadata = await this.fetchArxivMetadata(arxivId);
+            const metadata = await this.fetchArxivMetadata(arxivId, msg => {
+                metadataNotice.setMessage(msg);
+            });
             metadataNotice.hide();
-            
+
             if (!metadata) {
-                new Notice("Could not find metadata for the arXiv paper.");
+                new Notice("No metadata found for this arXiv paper (does it exist?).");
                 return;
             }
 
             await this.createNoteFromMetadata(metadata);
         } catch (error) {
             metadataNotice.hide();
-            new Notice("Failed to fetch paper metadata.");
+            if (error instanceof ArxivRateLimitedError) {
+                new Notice(error.message, 8000);
+            } else {
+                new Notice(`Failed to fetch paper metadata: ${(error as Error).message}`, 8000);
+            }
             console.error("Metadata fetch error:", error);
         }
     }
@@ -212,7 +369,14 @@ export default class PapersPlugin extends Plugin {
             const pdfUrl = `https://arxiv.org/pdf/${arxivId}.pdf`;
             progressNotice.setMessage(`Downloading PDF for "${metadata.title}"...`);
 
-            const response = await requestUrl(pdfUrl)
+            const response = await arxivRequest(pdfUrl, {
+                timeoutMs: 60000,
+                onRetry: (attempt, backoffMs, reason) => {
+                    progressNotice.setMessage(
+                        `PDF ${reason}, retrying in ${Math.round(backoffMs / 1000)}s (attempt ${attempt})...`,
+                    );
+                },
+            });
 
             if (!response.arrayBuffer) {
                 throw new Error("Failed to download PDF content");
@@ -230,13 +394,20 @@ export default class PapersPlugin extends Plugin {
         }
     }
 
-    async fetchArxivMetadata(arxivId: string): Promise<PaperMetadata | null> {
+    async fetchArxivMetadata(
+        arxivId: string,
+        onStatus: (msg: string) => void = () => { },
+    ): Promise<PaperMetadata | null> {
+        const url = `https://export.arxiv.org/api/query?id_list=${arxivId}`;
         try {
-            const response = await requestUrl(`https://export.arxiv.org/api/query?id_list=${arxivId}`);
-            
-            const text = response.text;
+            const response = await arxivRequest(url, {
+                onRetry: (attempt, backoffMs, reason) => {
+                    onStatus(`arXiv ${reason}, retrying in ${Math.round(backoffMs / 1000)}s (attempt ${attempt})...`);
+                },
+            });
+
             const parser = new DOMParser();
-            const xml = parser.parseFromString(text, "application/xml");
+            const xml = parser.parseFromString(response.text, "application/xml");
             const entry = xml.querySelector("entry");
             if (!entry) return null;
 
@@ -247,8 +418,21 @@ export default class PapersPlugin extends Plugin {
 
             return { title, authors, year, url: `https://arxiv.org/abs/${arxivId}` };
         } catch (error) {
-            console.error("Failed to fetch arXiv metadata:", error);
-            return null;
+            if (error instanceof ArxivRateLimitedError) {
+                onStatus("arXiv exhausted — trying OpenAlex...");
+                try {
+                    const fallback = await openAlexLookup(arxivId, this.settings.userEmail);
+                    if (fallback) return fallback;
+                    throw new ArxivRateLimitedError(
+                        "arXiv rate-limited and OpenAlex has no record for this ID. Please wait ~1 minute and retry.",
+                    );
+                } catch (oaErr) {
+                    console.error("OpenAlex fallback failed:", oaErr);
+                    if (oaErr instanceof ArxivRateLimitedError) throw oaErr;
+                    throw error;
+                }
+            }
+            throw error;
         }
     }
 
@@ -417,51 +601,31 @@ class ImportSelectModal extends SuggestModal<PaperMetadata> {
         this.manualRefresh();
     }
 
-    async searchArxivByTitle(title: string, maxRetries = 3): Promise<PaperMetadata[]> {
+    async searchArxivByTitle(title: string): Promise<PaperMetadata[]> {
         const sanitized = sanitizeTitle(title);
-        // Fix: Handle spaces properly for arXiv API
         const query = sanitized.split(' ').map(word => encodeURIComponent(word)).join('+');
         const url = `https://export.arxiv.org/api/query?search_query=ti:"${query}"&start=0&max_results=10`;
 
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                const response = await requestUrl(url);
-                
-                const text = response.text;
-                const parser = new DOMParser();
-                const xml = parser.parseFromString(text, "application/xml");
-                const entries = Array.from(xml.querySelectorAll("entry"));
-
-                return entries.map(entry => {
-                    const title = entry.querySelector("title")?.textContent?.trim().replace(/\s+/g, " ") || "";
-                    const authors = Array.from(entry.querySelectorAll("author > name")).map(e => e.textContent || "");
-                    const published = entry.querySelector("published")?.textContent || "";
-                    const year = new Date(published).getFullYear();
-                    const id = entry.querySelector("id")?.textContent?.match(/\d{4}\.\d{4,5}/)?.[0] || "";
-
-                    return { title, authors, year, url: `https://arxiv.org/abs/${id}` };
-                });
-
-            } catch (error) {
-                console.warn(`ArXiv search attempt ${attempt}/${maxRetries} failed:`, error);
-
-                const errorMessage = (error as Error).message;
-                const isNetworkError = errorMessage.includes('ERR_CONNECTION_RESET') ||
-                    errorMessage.includes('ERR_NETWORK') ||
-                    errorMessage.includes('request');
-
-                if (!isNetworkError || attempt === maxRetries) {
-                    throw error;
-                }
-
-                const delay = Math.pow(2, attempt - 1) * 1000;
-                await new Promise(resolve => setTimeout(resolve, delay));
-
-                this.emptyStateText = `Searching arXiv... (retry ${attempt + 1}/${maxRetries})`;
+        const response = await arxivRequest(url, {
+            onRetry: (attempt, backoffMs, reason) => {
+                this.emptyStateText = `Searching arXiv (${reason}, retrying in ${Math.round(backoffMs / 1000)}s, attempt ${attempt})...`;
                 this.manualRefresh();
-            }
-        }
-        return [];
+            },
+        });
+
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(response.text, "application/xml");
+        const entries = Array.from(xml.querySelectorAll("entry"));
+
+        return entries.map(entry => {
+            const title = entry.querySelector("title")?.textContent?.trim().replace(/\s+/g, " ") || "";
+            const authors = Array.from(entry.querySelectorAll("author > name")).map(e => e.textContent || "");
+            const published = entry.querySelector("published")?.textContent || "";
+            const year = new Date(published).getFullYear();
+            const id = entry.querySelector("id")?.textContent?.match(/\d{4}\.\d{4,5}/)?.[0] || "";
+
+            return { title, authors, year, url: `https://arxiv.org/abs/${id}` };
+        });
     }
 
     onCancel() {
@@ -544,6 +708,19 @@ class PapersSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.pdfFolder)
                     .onChange(async value => {
                         this.plugin.settings.pdfFolder = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Contact email (optional)")
+            .setDesc("Used as the OpenAlex \"mailto\" parameter for the polite-pool fallback when arXiv rate-limits you (common on VPNs). Leave blank to use a generic mailbox.")
+            .addText(text =>
+                text
+                    .setPlaceholder("you@example.com")
+                    .setValue(this.plugin.settings.userEmail)
+                    .onChange(async value => {
+                        this.plugin.settings.userEmail = value;
                         await this.plugin.saveSettings();
                     })
             );
