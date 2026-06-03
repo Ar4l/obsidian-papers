@@ -1,10 +1,10 @@
 {
-	"id": "papers",
-	"name": "Papers",
+	"id": "arxiv-papers",
+	"name": "arXiv Papers",
 	"version": "1.0.2",
 	"minAppVersion": "0.15.0",
-	"description": "Retrieve and import research papers.",
-	"author": "William Liang",
-	"authorUrl": "https://willjhliang.github.io",
+	"description": "Retrieve and import research papers from arXiv. Fork of willjhliang/obsidian-papers with rate-limit handling and OpenAlex fallback.",
+	"author": "Ar4l",
+	"authorUrl": "https://github.com/Ar4l",
 	"isDesktopOnly": false
 }

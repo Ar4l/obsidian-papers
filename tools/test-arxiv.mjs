@@ -13,7 +13,7 @@
 // === Helpers (same logic as main.ts) ===
 
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-papers/1.0.2 (+https://github.com/willjhliang/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.2 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 

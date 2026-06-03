@@ -1,6 +1,8 @@
-# Papers for Obsidian
+# arXiv Papers for Obsidian
 
-Papers is a simple plugin that retrieves and imports research papers into [Obsidian](https://obsidian.md). It queries the arXiv API to download PDFs and save metadata directly into your vault.
+arXiv Papers retrieves and imports research papers into [Obsidian](https://obsidian.md). It queries the arXiv API to download PDFs and save metadata directly into your vault, with a built-in OpenAlex fallback for when arXiv rate-limits your IP (common on VPNs).
+
+> Fork of [willjhliang/obsidian-papers](https://github.com/willjhliang/obsidian-papers) with rate-limit handling, request timeout, and OpenAlex fallback.
 
 https://github.com/user-attachments/assets/12d1b2d4-46f9-416d-b1c7-95e07fae14b3
 
@@ -17,7 +19,7 @@ The resulting note metadata includes paper title, authors, publication year, and
 The plugin isn't in the Obsidian Community catalog yet, so install it manually from source:
 
 ```bash
-git clone https://github.com/willjhliang/obsidian-papers.git
+git clone https://github.com/Ar4l/obsidian-papers.git
 cd obsidian-papers
 npm install
 npm run build
@@ -27,14 +29,14 @@ That produces `main.js`. Copy three files into your vault's plugin folder:
 
 ```bash
 cp main.js manifest.json styles.css \
-   /path/to/your/vault/.obsidian/plugins/papers/
+   /path/to/your/vault/.obsidian/plugins/arxiv-papers/
 ```
 
-Then in Obsidian: **Settings → Community plugins**, toggle "Papers" off and on (or reload Obsidian). Your existing `data.json` (settings) is untouched.
+Then in Obsidian: **Settings → Community plugins**, toggle "arXiv Papers" off and on (or reload Obsidian). Your existing `data.json` (settings) is untouched.
 
 ### Optional: contact email for the OpenAlex fallback
 
-When arXiv rate-limits your IP (common on VPNs — arXiv throttles per-IP via Fastly, so a shared egress IP can put you in penalty), the plugin falls back to OpenAlex for paper metadata. Setting your email in **Settings → Papers → Contact email** routes you through OpenAlex's polite pool with a higher quota.
+When arXiv rate-limits your IP (common on VPNs — arXiv throttles per-IP via Fastly, so a shared egress IP can put you in penalty), the plugin falls back to OpenAlex for paper metadata. Setting your email in **Settings → arXiv Papers → Contact email** routes you through OpenAlex's polite pool with a higher quota.
 
 ### Run the mock tests
 
