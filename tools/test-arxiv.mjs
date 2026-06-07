@@ -13,7 +13,7 @@
 // === Helpers (same logic as main.ts) ===
 
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-arxiv-papers/1.0.3 (+https://github.com/Ar4l/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.4 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 
@@ -379,6 +379,37 @@ await test("conflict: a..z used -> next is 'aa'", async () => {
     const all26 = "abcdefghijklmnopqrstuvwxyz".split("").map(c => "Smith 2023" + c);
     const r = resolveNoteTitleConflictSync(all26, "Smith 2023");
     assert(r.newTitle === "Smith 2023aa", `newTitle=${r.newTitle}`);
+});
+
+// === ALPHAXIV placeholder tests (mirror formatNoteContent logic) ===
+
+const extractArxivId = (url) => {
+    const m = url.match(/arxiv\.org\/(abs|pdf|html)\/(\d{4}\.\d{4,5})(v\d+)?/);
+    return m ? m[2] : null;
+};
+const renderAlphaxiv = (url) => {
+    const id = extractArxivId(url);
+    return id ? `https://www.alphaxiv.org/abs/${id}` : "";
+};
+
+await test("alphaxiv: arxiv /abs/ URL -> alphaxiv.org/abs/<id>", async () => {
+    const got = renderAlphaxiv("https://arxiv.org/abs/1706.03762");
+    assert(got === "https://www.alphaxiv.org/abs/1706.03762", `got: ${got}`);
+});
+
+await test("alphaxiv: arxiv /pdf/ URL -> alphaxiv.org/abs/<id>", async () => {
+    const got = renderAlphaxiv("https://arxiv.org/pdf/2604.12002");
+    assert(got === "https://www.alphaxiv.org/abs/2604.12002", `got: ${got}`);
+});
+
+await test("alphaxiv: versioned arxiv URL strips version", async () => {
+    const got = renderAlphaxiv("https://arxiv.org/abs/1706.03762v5");
+    assert(got === "https://www.alphaxiv.org/abs/1706.03762", `got: ${got}`);
+});
+
+await test("alphaxiv: non-arxiv URL -> empty string", async () => {
+    const got = renderAlphaxiv("https://example.com/paper.pdf");
+    assert(got === "", `got: "${got}"`);
 });
 
 // === Summary ===

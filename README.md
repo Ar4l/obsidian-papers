@@ -10,7 +10,15 @@ Papers has one key function: search for a paper, then create a new note with its
 1. arXiv URL: A direct link to the paper (e.g., https://arxiv.org/abs/1706.03762).
 2. Title: The paper title, which is used to fuzzy search arXiv and prompt the user to choose among results.
 
-The resulting note metadata includes paper title, authors, publication year, and URL. We can download the PDF and embed it in the note as well.
+The resulting note metadata includes paper title, authors, publication year, URL, and an [alphaxiv.org](https://www.alphaxiv.org) conversation link. We can download the PDF and embed it in the note as well.
+
+### Upgrading from 1.0.3
+
+1.0.4 adds an `{{ALPHAXIV}}` template placeholder that renders to `https://www.alphaxiv.org/abs/<id>` (or empty for non-arXiv URLs). New installs get it by default. If you customised the template in **Settings → arXiv Papers → Note template**, add this line under `url: {{URL}}` to enable the link:
+
+```yaml
+alphaxiv: {{ALPHAXIV}}
+```
 
 ## Install / Build
 
