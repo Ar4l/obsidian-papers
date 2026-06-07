@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-arxiv-papers",
-	"version": "1.0.4",
+	"version": "1.0.5",
 	"description": "Retrieve and import research papers from arXiv.",
 	"main": "main.js",
 	"scripts": {

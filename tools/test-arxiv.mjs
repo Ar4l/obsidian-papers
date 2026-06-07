@@ -13,7 +13,7 @@
 // === Helpers (same logic as main.ts) ===
 
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-arxiv-papers/1.0.4 (+https://github.com/Ar4l/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.5 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 
@@ -384,8 +384,8 @@ await test("conflict: a..z used -> next is 'aa'", async () => {
 // === ALPHAXIV placeholder tests (mirror formatNoteContent logic) ===
 
 const extractArxivId = (url) => {
-    const m = url.match(/arxiv\.org\/(abs|pdf|html)\/(\d{4}\.\d{4,5})(v\d+)?/);
-    return m ? m[2] : null;
+    const m = url.match(/(?:arxiv\.org\/(?:abs|pdf|html)|alphaxiv\.org\/abs)\/(\d{4}\.\d{4,5})(v\d+)?/);
+    return m ? m[1] : null;
 };
 const renderAlphaxiv = (url) => {
     const id = extractArxivId(url);
@@ -410,6 +410,26 @@ await test("alphaxiv: versioned arxiv URL strips version", async () => {
 await test("alphaxiv: non-arxiv URL -> empty string", async () => {
     const got = renderAlphaxiv("https://example.com/paper.pdf");
     assert(got === "", `got: "${got}"`);
+});
+
+await test("input: alphaxiv URL -> extracts arxiv id", async () => {
+    const id = extractArxivId("https://www.alphaxiv.org/abs/2606.06021");
+    assert(id === "2606.06021", `got: ${id}`);
+});
+
+await test("input: alphaxiv URL with chatId query string -> extracts arxiv id", async () => {
+    const id = extractArxivId("https://www.alphaxiv.org/abs/2606.06021?chatId=019ea43a-0b76-7b44-a583-3e92569693c0");
+    assert(id === "2606.06021", `got: ${id}`);
+});
+
+await test("input: alphaxiv URL without www -> extracts arxiv id", async () => {
+    const id = extractArxivId("https://alphaxiv.org/abs/1706.03762");
+    assert(id === "1706.03762", `got: ${id}`);
+});
+
+await test("input: alphaxiv URL round-trips to alphaxiv URL via renderAlphaxiv", async () => {
+    const got = renderAlphaxiv("https://www.alphaxiv.org/abs/2606.06021?chatId=foo");
+    assert(got === "https://www.alphaxiv.org/abs/2606.06021", `got: ${got}`);
 });
 
 // === Summary ===
