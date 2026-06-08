@@ -44,6 +44,14 @@ interface PaperMetadata {
     url: string;
 }
 
+interface ArxivUrlInput {
+    isArxivUrl: true;
+    input: string;
+}
+
+type ImportChoice = PaperMetadata | ArxivUrlInput;
+type ImportChoiceCallback = (choice: ImportChoice | null) => void;
+
 const sanitizeTitle = (title: string): string =>
     title.toLowerCase().replace(/[-:,.]/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -144,7 +152,7 @@ async function resolveNoteTitleConflict(
 // arXiv asks for ≥3s between requests; their throttle is per-IP via Fastly.
 // VPN users share an egress IP, so they get throttled by the whole pool.
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-arxiv-papers/1.0.5 (+https://github.com/Ar4l/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.6 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 
@@ -152,7 +160,7 @@ let lastArxivCallAt = 0;
 async function arxivRateLimit(): Promise<void> {
     const gap = Date.now() - lastArxivCallAt;
     if (gap < ARXIV_MIN_GAP_MS) {
-        await new Promise(r => setTimeout(r, ARXIV_MIN_GAP_MS - gap));
+        await new Promise(r => window.setTimeout(r, ARXIV_MIN_GAP_MS - gap));
     }
     lastArxivCallAt = Date.now();
 }
@@ -167,14 +175,14 @@ function requestWithTimeout(
 ): Promise<RequestUrlResponse> {
     return new Promise((resolve, reject) => {
         let settled = false;
-        const timer = setTimeout(() => {
+        const timer = window.setTimeout(() => {
             if (settled) return;
             settled = true;
             reject(new Error("TIMEOUT"));
         }, timeoutMs);
         requestFn(opts).then(
-            res => { if (!settled) { settled = true; clearTimeout(timer); resolve(res); } },
-            err => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } },
+            res => { if (!settled) { settled = true; window.clearTimeout(timer); resolve(res); } },
+            err => { if (!settled) { settled = true; window.clearTimeout(timer); reject(err instanceof Error ? err : new Error(String(err))); } },
         );
     });
 }
@@ -219,7 +227,7 @@ async function arxivRequest(url: string, opts: ArxivRequestOpts = {}): Promise<R
                 if (attempt === maxRetries) throw new ArxivRateLimitedError();
                 const backoff = RATE_LIMIT_BACKOFFS_MS[Math.min(attempt, RATE_LIMIT_BACKOFFS_MS.length - 1)];
                 onRetry(attempt + 1, backoff, `rate-limited (HTTP ${res.status})`);
-                await new Promise(r => setTimeout(r, backoff));
+                await new Promise(r => window.setTimeout(r, backoff));
                 continue;
             }
 
@@ -251,7 +259,7 @@ async function arxivRequest(url: string, opts: ArxivRequestOpts = {}): Promise<R
             const backoffTable = isTimeout ? RATE_LIMIT_BACKOFFS_MS : NETWORK_BACKOFFS_MS;
             const backoff = backoffTable[Math.min(attempt, backoffTable.length - 1)];
             onRetry(attempt + 1, backoff, isTimeout ? "timeout (likely throttled)" : `network error: ${err.message}`);
-            await new Promise(r => setTimeout(r, backoff));
+            await new Promise(r => window.setTimeout(r, backoff));
         }
     }
     throw new Error("arxivRequest: exhausted retries");
@@ -311,15 +319,18 @@ export default class PapersPlugin extends Plugin {
     }
 
     showImportModal() {
-        new ImportSelectModal(this.app, async (choice) => {
-            if (!choice) return;
-
-            if (choice.isArxivUrl) {
-                await this.processArxivUrl(choice.input);
-            } else {
-                await this.createNoteFromMetadata(choice);
-            }
+        new ImportSelectModal(this.app, (choice) => {
+            void this.handleImportChoice(choice);
         }).open();
+    }
+
+    private async handleImportChoice(choice: ImportChoice | null): Promise<void> {
+        if (!choice) return;
+        if ("isArxivUrl" in choice) {
+            await this.processArxivUrl(choice.input);
+        } else {
+            await this.createNoteFromMetadata(choice);
+        }
     }
 
     async processArxivUrl(input: string) {
@@ -366,29 +377,11 @@ export default class PapersPlugin extends Plugin {
             return;
         }
 
-        const modal = new ImportSelectModal(this.app, async (choice) => {
-            if (!choice) return;
-
-            if (choice.isArxivUrl) {
-                await this.processArxivUrl(choice.input);
-            } else {
-                await this.createNoteFromMetadata(choice);
-            }
+        const modal = new ImportSelectModal(this.app, (choice) => {
+            void this.handleImportChoice(choice);
         });
 
-        // Pre-fill and auto-search for clipboard content
-        modal.currentInput = clipboardText.trim();
-        modal.onOpen = function () {
-            SuggestModal.prototype.onOpen.call(this);
-            setTimeout(() => {
-                if (this.inputEl) {
-                    this.inputEl.value = clipboardText.trim();
-                    this.inputEl.focus();
-                    this.performSearch();
-                }
-            }, 10);
-        };
-
+        modal.prefillInput = clipboardText.trim();
         modal.open();
     }
 
@@ -427,7 +420,7 @@ export default class PapersPlugin extends Plugin {
             try {
                 pdfFilename = await this.downloadPdf(metadata);
             } catch (error) {
-                new Notice(`PDF download failed: ${error.message}`);
+                new Notice(`PDF download failed: ${(error as Error).message}`);
                 console.error("PDF download error:", error);
             }
         }
@@ -492,8 +485,8 @@ export default class PapersPlugin extends Plugin {
             return pdfFilename;
         } catch (error) {
             progressNotice.setMessage(`Failed to download PDF for "${metadata.title}"`);
-            setTimeout(() => progressNotice.hide(), 5000);
-            throw new Error(`Failed to download PDF: ${error.message}`);
+            window.setTimeout(() => progressNotice.hide(), 5000);
+            throw new Error(`Failed to download PDF: ${(error as Error).message}`);
         }
     }
 
@@ -563,7 +556,8 @@ export default class PapersPlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const loaded = (await this.loadData()) as Partial<Settings> | null;
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
     }
 
     async saveSettings() {
@@ -573,26 +567,24 @@ export default class PapersPlugin extends Plugin {
 
 class ImportSelectModal extends SuggestModal<PaperMetadata> {
     choices: PaperMetadata[] = [];
-    onChoice: (choice: any | null) => void;
+    onChoice: ImportChoiceCallback;
     loading = false;
     hasSearched = false;
     currentInput = "";
+    prefillInput = "";
 
-    constructor(app: App, onChoice: (choice: any | null) => void) {
+    constructor(app: App, onChoice: ImportChoiceCallback) {
         super(app);
         this.onChoice = onChoice;
         this.setPlaceholder("Search paper title or arXiv URL...");
     }
 
     onOpen() {
-        super.onOpen();
+        void super.onOpen();
 
-        // if (this.resultContainerEl) {
-        //     this.resultContainerEl.style.display = 'none';
-        // }
         if (this.resultContainerEl) this.resultContainerEl.hide();
 
-        setTimeout(() => {
+        window.setTimeout(() => {
             if (this.inputEl) {
                 this.inputEl.focus();
                 this.inputEl.addEventListener('keyup', (e) => {
@@ -600,9 +592,13 @@ class ImportSelectModal extends SuggestModal<PaperMetadata> {
                         e.preventDefault();
                         e.stopPropagation();
                         e.stopImmediatePropagation();
-                        this.performSearch();
+                        void this.performSearch();
                     }
                 });
+                if (this.prefillInput) {
+                    this.inputEl.value = this.prefillInput;
+                    this.inputEl.dispatchEvent(new Event('input'));
+                }
             }
         }, 10);
     }
@@ -639,7 +635,7 @@ class ImportSelectModal extends SuggestModal<PaperMetadata> {
     }
 
     manualRefresh() {
-        setTimeout(() => {
+        window.setTimeout(() => {
             if (this.inputEl) {
                 this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
             }
@@ -750,7 +746,7 @@ class PapersSettingTab extends PluginSettingTab {
             .setDesc("Folder to save paper notes.")
             .addText(text =>
                 text
-                    .setPlaceholder("Example: Research/Papers")
+                    .setPlaceholder("Example: research/papers")
                     .setValue(this.plugin.settings.notesFolder)
                     .onChange(async value => {
                         this.plugin.settings.notesFolder = value;

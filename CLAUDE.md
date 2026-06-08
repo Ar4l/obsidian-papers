@@ -16,13 +16,21 @@ When making a change that ships to users, bump the version in **four** places (t
 ## Build + install (this machine)
 
 ```bash
-npm run build                       # produces main.js
+npm run build                       # tsc + eslint (obsidianmd/recommended) + esbuild
 node tools/test-arxiv.mjs           # all tests should pass; hits live arxiv + OpenAlex
 cp main.js manifest.json styles.css \
    "/Users/Aral.De.Moor/Library/Mobile Documents/iCloud~md~obsidian/Documents/Brain 2.0/.obsidian/plugins/arxiv-papers/"
 ```
 
 **Never touch `data.json` in the install dir.** It holds user settings (notesFolder, pdfFolder, customised noteTemplate). If a change requires a settings migration, edit `data.json` in place with a targeted patch — don't overwrite it.
+
+## Lint = marketplace gate
+
+`npm run build` runs `eslint main.ts` with `eslint-plugin-obsidianmd` (the official Obsidian linter). **Lint errors block the build, which blocks releases.** This matches the automated checks the community.obsidian.md submission flow runs against the repo — if local lint fails, the marketplace will reject the version (silently, by leaving it out of `community-plugins.json`).
+
+If you see ESLint peer-dep complaints, run `npm install --legacy-peer-deps` — the repo's TS 4.7.4 conflicts with typescript-eslint@8's peer range but works fine at runtime. The release workflow already passes this flag.
+
+The brands whitelist (`arXiv`, `OpenAlex`, `VPN`, `VPNs`) in `eslint.config.mjs` exists for `obsidianmd/ui/sentence-case`. Add new product names there rather than `// eslint-disable`.
 
 ## Note template + frontmatter
 
@@ -55,3 +63,12 @@ The `noteTemplate` setting is stored in `data.json` and persists across upgrades
 - Tags trigger `.github/workflows/release.yml` which uploads `main.js`, `manifest.json`, `styles.css` with artifact attestations.
 - Marketplace submissions go through `community.obsidian.md` (browser-auth, manual) — the legacy `obsidianmd/obsidian-releases` PR flow is restricted for new submissions.
 - Never push tags or publish releases without explicit user instruction.
+
+### Pre-release verification (run before every tag)
+
+```bash
+npm run build               # must exit 0 — runs tsc + eslint + esbuild
+node tools/test-arxiv.mjs   # must exit 0
+```
+
+If either fails, **fix it before tagging**. A tag with a broken build still publishes a GitHub Release but the marketplace catalog won't accept it, so the version effectively doesn't ship to users. Check the latest version actually landed by querying `community.obsidian.md/account/plugins/arxiv-papers` (logged-in author view) or grepping `community-plugins.json` in `obsidianmd/obsidian-releases`.
