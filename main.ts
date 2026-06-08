@@ -152,7 +152,7 @@ async function resolveNoteTitleConflict(
 // arXiv asks for ≥3s between requests; their throttle is per-IP via Fastly.
 // VPN users share an egress IP, so they get throttled by the whole pool.
 const ARXIV_MIN_GAP_MS = 3000;
-const POLITE_UA = "obsidian-arxiv-papers/1.0.6 (+https://github.com/Ar4l/obsidian-papers)";
+const POLITE_UA = "obsidian-arxiv-papers/1.0.7 (+https://github.com/Ar4l/obsidian-papers)";
 const RATE_LIMIT_BACKOFFS_MS = [10000, 30000, 60000];
 const NETWORK_BACKOFFS_MS = [4000, 8000, 16000];
 
